@@ -1,257 +1,318 @@
-const TOKEN = ENV_BOT_TOKEN // Get it from @BotFather
+const TOKEN = ENV_BOT_TOKEN
 const WEBHOOK = '/endpoint'
-const SECRET = ENV_BOT_SECRET // A-Z, a-z, 0-9, _ and -
-const ADMIN_UID = ENV_ADMIN_UID // your user id, get it from https://t.me/username_to_id_bot
+const SECRET = ENV_BOT_SECRET
+const ADMIN_UID = ENV_ADMIN_UID
 
-const NOTIFY_INTERVAL = 3600 * 1000;
-const fraudDb = 'https://raw.githubusercontent.com/LloydAsp/nfd/main/data/fraud.db';
-const notificationUrl = 'https://raw.githubusercontent.com/laningya/nfd/refs/heads/main/data/notification.txt'
-const startMsgUrl = 'https://raw.githubusercontent.com/laningya/nfd/refs/heads/main/data/startMessage.md';
+const NOTIFY_INTERVAL = 3600 * 1000
+const fraudDb = 'https://raw.githubusercontent.com/laningya/nfd/refs/heads/main/data/fraud.db'
+const startMsgUrl = 'https://raw.githubusercontent.com/laningya/nfd/refs/heads/main/data/startMessage.md'
 
-const enable_notification = true
-/**
- * Return url to telegram api, optionally with parameters added
- */
-function apiUrl (methodName, params = null) {
-  let query = ''
-  if (params) {
-    query = '?' + new URLSearchParams(params).toString()
-  }
-  return `https://api.telegram.org/bot${TOKEN}/${methodName}${query}`
+// Markdown 转义函数
+function escapeMarkdown(text) {
+  return text.replace(/[_*[\]()~`>#+-=|{}.!]/g, '\\$&')
 }
 
-function requestTelegram(methodName, body, params = null){
-  return fetch(apiUrl(methodName, params), body)
-    .then(r => r.json())
+function apiUrl(methodName, params = null) {
+  return `https://api.telegram.org/bot${TOKEN}/${methodName}${
+    params ? '?' + new URLSearchParams(params) : ''
+  }`
 }
 
-function makeReqBody(body){
-  return {
-    method:'POST',
-    headers:{
-      'content-type':'application/json'
-    },
-    body:JSON.stringify(body)
-  }
+async function requestTelegram(methodName, body, params) {
+  const response = await fetch(apiUrl(methodName, params), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  })
+  return response.json()
 }
 
-function sendMessage(msg = {}){
-  return requestTelegram('sendMessage', makeReqBody(msg))
-}
+const sendMessage = (msg) => requestTelegram('sendMessage', msg)
+const copyMessage = (msg) => requestTelegram('copyMessage', msg)
+const forwardMessage = (msg) => requestTelegram('forwardMessage', msg)
 
-function copyMessage(msg = {}){
-  return requestTelegram('copyMessage', makeReqBody(msg))
-}
-
-function forwardMessage(msg){
-  return requestTelegram('forwardMessage', makeReqBody(msg))
-}
-
-/**
- * Wait for requests to the worker
- */
-addEventListener('fetch', event => {
+addEventListener('fetch', (event) => {
   const url = new URL(event.request.url)
   if (url.pathname === WEBHOOK) {
     event.respondWith(handleWebhook(event))
   } else if (url.pathname === '/registerWebhook') {
     event.respondWith(registerWebhook(event, url, WEBHOOK, SECRET))
-  } else if (url.pathname === '/unRegisterWebhook') {
-    event.respondWith(unRegisterWebhook(event))
   } else {
-    event.respondWith(new Response('No handler for this request'))
+    event.respondWith(new Response('Not Found', { status: 404 }))
   }
 })
 
-/**
- * Handle requests to WEBHOOK
- * https://core.telegram.org/bots/api#update
- */
-async function handleWebhook (event) {
-  // Check secret
+async function handleWebhook(event) {
   if (event.request.headers.get('X-Telegram-Bot-Api-Secret-Token') !== SECRET) {
     return new Response('Unauthorized', { status: 403 })
   }
 
-  // Read request body synchronously
   const update = await event.request.json()
-  // Deal with response asynchronously
   event.waitUntil(onUpdate(update))
-
   return new Response('Ok')
 }
 
-/**
- * Handle incoming Update
- * https://core.telegram.org/bots/api#update
- */
-async function onUpdate (update) {
-  if ('message' in update) {
-    await onMessage(update.message)
-  }
+async function onUpdate(update) {
+  if (update.message) await onMessage(update.message)
 }
 
-/**
- * Handle incoming Message
- * https://core.telegram.org/bots/api#message
- */
-async function onMessage (message) {
-  if(message.text === '/start'){
-    let startMsg = await fetch(startMsgUrl).then(r => r.text())
+async function onMessage(message) {
+  if (message.text === '/start') {
+    const startMsg = await fetch(startMsgUrl).then(r => r.text())
     return sendMessage({
-      chat_id:message.chat.id,
-      text:startMsg,
+      chat_id: message.chat.id,
+      text: startMsg
     })
   }
-  if(message.chat.id.toString() === ADMIN_UID){
-    if(!message?.reply_to_message?.chat){
-      return sendMessage({
-        chat_id:ADMIN_UID,
-        text:'使用方法，回复转发的消息，并发送回复消息，或者`/block`、`/unblock`、`/checkblock`等指令'
-      })
-    }
-    if(/^\/block$/.exec(message.text)){
-      return handleBlock(message)
-    }
-    if(/^\/unblock$/.exec(message.text)){
-      return handleUnBlock(message)
-    }
-    if(/^\/checkblock$/.exec(message.text)){
-      return checkBlock(message)
-    }
-    let guestChantId = await nfd.get('msg-map-' + message?.reply_to_message.message_id,
-                                      { type: "json" })
-    return copyMessage({
-      chat_id: guestChantId,
-      from_chat_id:message.chat.id,
-      message_id:message.message_id,
-    })
-  }
-  return handleGuestMessage(message)
+
+  return message.chat.id.toString() === ADMIN_UID 
+    ? handleAdminMessage(message)
+    : handleGuestMessage(message)
 }
 
-async function handleGuestMessage(message){
-  let chatId = message.chat.id;
-  let isblocked = await nfd.get('isblocked-' + chatId, { type: "json" })
+// 管理员消息处理
+async function handleAdminMessage(message) {
+  if (!message?.reply_to_message) {
+    return sendMessage({
+      chat_id: ADMIN_UID,
+      text: '请回复消息使用以下命令：\n/block - 封禁用户\n/unblock - 解封用户\n/checkblock - 查看封禁状态\n/info - 查看用户信息'
+    })
+  }
+
+  const command = message.text?.trim()
+  switch(true) {
+    case /^\/block$/.test(command): return handleBlock(message)
+    case /^\/unblock$/.test(command): return handleUnBlock(message)
+    case /^\/checkblock$/.test(command): return checkBlock(message)
+    case /^\/info$/.test(command): return handleUserInfo(message)
+    default: return forwardResponse(message)
+  }
+}
+
+// 普通用户消息处理
+async function handleGuestMessage(message) {
+  const chatId = message.chat.id
+  const isBlocked = await checkBlockStatus(chatId)
   
-  if(isblocked){
-    return sendMessage({
-      chat_id: chatId,
-      text:'Your are blocked'
-    })
+  if (isBlocked) {
+    return sendMessage({ chat_id: chatId, text: '⚠️ 您已被限制使用本服务' })
   }
 
-  let forwardReq = await forwardMessage({
-    chat_id:ADMIN_UID,
-    from_chat_id:message.chat.id,
-    message_id:message.message_id
+  await storeUserInfo(chatId, {
+    username: message.chat.username,
+    first_name: message.chat.first_name
   })
-  console.log(JSON.stringify(forwardReq))
-  if(forwardReq.ok){
-    await nfd.put('msg-map-' + forwardReq.result.message_id, chatId)
+
+  const forwardResult = await forwardMessage({
+    chat_id: ADMIN_UID,
+    from_chat_id: chatId,
+    message_id: message.message_id
+  })
+
+  if (forwardResult.ok) {
+    await nfd.put(`msg-map-${forwardResult.result.message_id}`, chatId)
   }
+
   return handleNotify(message)
 }
 
-async function handleNotify(message){
-  // 先判断是否是诈骗人员，如果是，则直接提醒
-  // 如果不是，则根据时间间隔提醒：用户id，交易注意点等
-  let chatId = message.chat.id;
-  if(await isFraud(chatId)){
+// 通知处理核心
+async function handleNotify(message) {
+  const chatId = message.chat.id
+  try {
+    if (await isFraud(chatId)) {
+      return sendFraudAlert(chatId)
+    }
+
+    const lastNotify = await nfd.get(`lastmsg-${chatId}`)
+    if (!lastNotify || Date.now() - lastNotify > NOTIFY_INTERVAL) {
+      await nfd.put(`lastmsg-${chatId}`, Date.now())
+      return sendUserNotification(chatId)
+    }
+  } catch (error) {
+    console.error(`通知处理失败: ${error.stack}`)
     return sendMessage({
       chat_id: ADMIN_UID,
-      text:`检测到骗子，UID${chatId}`
+      text: `⚠️ 系统通知异常: ${error.message}`
     })
   }
-  if(enable_notification){
-    let lastMsgTime = await nfd.get('lastmsg-' + chatId, { type: "json" })
-    if(!lastMsgTime || Date.now() - lastMsgTime > NOTIFY_INTERVAL){
-      await nfd.put('lastmsg-' + chatId, Date.now())
-      return sendMessage({
-        chat_id: ADMIN_UID,
-        text:await fetch(notificationUrl).then(r => r.text())
-      })
+}
+
+// 用户信息存储
+async function storeUserInfo(chatId, info) {
+  await nfd.put(`userinfo-${chatId}`, JSON.stringify(info))
+}
+
+// 用户信息获取
+async function getUserDetails(chatId) {
+  try {
+    const userInfo = await nfd.get(`userinfo-${chatId}`, { type: "json" }) || {}
+    return {
+      id: chatId,
+      username: userInfo.username ? `@${escapeMarkdown(userInfo.username)}` : '无',
+      firstName: escapeMarkdown(userInfo.first_name || '未设置')
+    }
+  } catch (error) {
+    console.error(`用户信息获取失败: ${chatId}`, error)
+    return {
+      id: chatId,
+      username: '获取失败',
+      firstName: '获取失败'
     }
   }
 }
 
-async function handleBlock(message){
-  let guestChantId = await nfd.get('msg-map-' + message.reply_to_message.message_id,
-                                      { type: "json" })
-  if(guestChantId === ADMIN_UID){
+// 封禁管理功能
+async function handleBlock(message) {
+  try {
+    const guestChatId = await nfd.get(`msg-map-${message.reply_to_message.message_id}`, { type: "json" })
+    const user = await getUserDetails(guestChatId)
+    
+    await nfd.put(`isblocked-${guestChatId}`, "true", {
+      metadata: { isBlocked: true }
+    })
+
+    return sendAdminAlert('✅ 用户封禁成功', user)
+  } catch (error) {
+    console.error('封禁操作异常:', error)
+    return sendOperationError('封禁', error)
+  }
+}
+
+async function handleUnBlock(message) {
+  try {
+    const guestChatId = await nfd.get(`msg-map-${message.reply_to_message.message_id}`, { type: "json" })
+    const user = await getUserDetails(guestChatId)
+    
+    await nfd.delete(`isblocked-${guestChatId}`)
+
+    return sendAdminAlert('✅ 用户解封成功', user)
+  } catch (error) {
+    console.error('解封操作异常:', error)
+    return sendOperationError('解封', error)
+  }
+}
+
+async function checkBlock(message) {
+  try {
+    const guestChatId = await nfd.get(`msg-map-${message.reply_to_message.message_id}`, { type: "json" })
+    const user = await getUserDetails(guestChatId)
+    const isBlocked = await checkBlockStatus(guestChatId)
+
     return sendMessage({
       chat_id: ADMIN_UID,
-      text:'不能屏蔽自己'
+      text: [
+        `ℹ️ 用户状态: ${isBlocked ? '已封禁' : '正常'}`,
+        `🆔 ID: \`${user.id}\``,
+        `👤 用户名: ${user.username}`,
+        `📛 称呼: ${user.firstName}`
+      ].join('\n'),
+      parse_mode: 'MarkdownV2'
+    })
+  } catch (error) {
+    console.error('状态检查异常:', error)
+    return sendOperationError('状态查询', error)
+  }
+}
+
+// 工具函数
+async function checkBlockStatus(chatId) {
+  const entry = await nfd.getWithMetadata(`isblocked-${chatId}`)
+  return entry.metadata?.isBlocked ?? false
+}
+
+function sendAdminAlert(action, user) {
+  return sendMessage({
+    chat_id: ADMIN_UID,
+    text: [
+      action,
+      `🆔 ID: \`${user.id}\``,
+      `👤 用户名: ${user.username}`,
+      `📛 称呼: ${user.firstName}`
+    ].join('\n'),
+    parse_mode: 'MarkdownV2'
+  })
+}
+
+function sendOperationError(operation, error) {
+  return sendMessage({
+    chat_id: ADMIN_UID,
+    text: `❌ ${operation}操作失败: ${error.message}`
+  })
+}
+
+async function sendUserNotification(chatId) {
+  const user = await getUserDetails(chatId)
+  return sendMessage({
+    chat_id: ADMIN_UID,
+    text: [
+      '🔔请确认对方身份',
+      `🆔 ID: \`${user.id}\``,
+      `👤 用户名: ${user.username}`,
+      `📛 称呼: ${user.firstName}`
+    ].join('\n'),
+    parse_mode: 'MarkdownV2'
+  })
+}
+
+async function sendFraudAlert(chatId) {
+  const user = await getUserDetails(chatId)
+  return sendMessage({
+    chat_id: ADMIN_UID,
+    text: [
+      '🚨 高风险用户警报',
+      `🆔 ID: \`${user.id}\``,
+      `👤 用户名: ${user.username}`,
+      `📛 称呼: ${user.firstName}`,
+      '⚠️ 该用户存在于欺诈数据库'
+    ].join('\n'),
+    parse_mode: 'MarkdownV2'
+  })
+}
+
+// 用户信息查询
+async function handleUserInfo(message) {
+  try {
+    const guestChatId = await nfd.get(`msg-map-${message.reply_to_message.message_id}`, { type: "json" })
+    const user = await getUserDetails(guestChatId)
+    
+    return sendMessage({
+      chat_id: ADMIN_UID,
+      text: [
+        '📋 用户档案',
+        `🆔 ID: \`${user.id}\``,
+        `👤 用户名: ${user.username}`,
+        `📛 称呼: ${user.firstName}`
+      ].join('\n'),
+      parse_mode: 'MarkdownV2'
+    })
+  } catch (error) {
+    console.error('用户信息查询失败:', error)
+    return sendMessage({
+      chat_id: ADMIN_UID,
+      text: `⚠️ 信息查询失败: ${error.message}`
     })
   }
-  await nfd.put('isblocked-' + guestChantId, true)
-
-  return sendMessage({
-    chat_id: ADMIN_UID,
-    text: `UID:${guestChantId}屏蔽成功`,
-  })
 }
 
-async function handleUnBlock(message){
-  let guestChantId = await nfd.get('msg-map-' + message.reply_to_message.message_id,
-  { type: "json" })
-
-  await nfd.put('isblocked-' + guestChantId, false)
-
-  return sendMessage({
-    chat_id: ADMIN_UID,
-    text:`UID:${guestChantId}解除屏蔽成功`,
-  })
+// Webhook注册
+async function registerWebhook(event, url, suffix, secret) {
+  const webhookUrl = `${url.protocol}//${url.hostname}${suffix}`
+  const response = await fetch(apiUrl('setWebhook', {
+    url: webhookUrl,
+    secret_token: secret,
+    allowed_updates: ['message']
+  }))
+  return new Response(await response.text())
 }
 
-async function checkBlock(message){
-  let guestChantId = await nfd.get('msg-map-' + message.reply_to_message.message_id,
-  { type: "json" })
-  let blocked = await nfd.get('isblocked-' + guestChantId, { type: "json" })
-
-  return sendMessage({
-    chat_id: ADMIN_UID,
-    text: `UID:${guestChantId}` + (blocked ? '被屏蔽' : '没有被屏蔽')
-  })
-}
-
-/**
- * Send plain text message
- * https://core.telegram.org/bots/api#sendmessage
- */
-async function sendPlainText (chatId, text) {
-  return sendMessage({
-    chat_id: chatId,
-    text
-  })
-}
-
-/**
- * Set webhook to this worker's url
- * https://core.telegram.org/bots/api#setwebhook
- */
-async function registerWebhook (event, requestUrl, suffix, secret) {
-  // https://core.telegram.org/bots/api#setwebhook
-  const webhookUrl = `${requestUrl.protocol}//${requestUrl.hostname}${suffix}`
-  const r = await (await fetch(apiUrl('setWebhook', { url: webhookUrl, secret_token: secret }))).json()
-  return new Response('ok' in r && r.ok ? 'Ok' : JSON.stringify(r, null, 2))
-}
-
-/**
- * Remove webhook
- * https://core.telegram.org/bots/api#setwebhook
- */
-async function unRegisterWebhook (event) {
-  const r = await (await fetch(apiUrl('setWebhook', { url: '' }))).json()
-  return new Response('ok' in r && r.ok ? 'Ok' : JSON.stringify(r, null, 2))
-}
-
-async function isFraud(id){
-  id = id.toString()
-  let db = await fetch(fraudDb).then(r => r.text())
-  let arr = db.split('\n').filter(v => v)
-  console.log(JSON.stringify(arr))
-  let flag = arr.filter(v => v === id).length !== 0
-  console.log(flag)
-  return flag
+// 欺诈检测系统
+let fraudCache = null
+async function isFraud(id) {
+  if (!fraudCache) {
+    const dbText = await fetch(fraudDb).then(r => r.text())
+    fraudCache = new Set(dbText.split('\n').filter(Boolean))
+    setTimeout(() => fraudCache = null, 3600_000)
+  }
+  return fraudCache.has(id.toString())
 }
