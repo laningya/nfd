@@ -3,7 +3,7 @@ No Fraud / Node Forward Bot
 
 一个基于cloudflare worker的telegram 消息转发bot，集成了反欺诈功能
 
-## 2025/3/16更新
+## 2025/3/16 更新
 1. 移除通知模板文件，美化输出UI
 2. 改进封禁、解封逻辑，提升稳定性
 
